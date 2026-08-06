@@ -1,114 +1,114 @@
-#!/usr/bin/env python3
 """
-Apify Indeed Scraper - Apify-style Indeed scraper alternative - free & open source
-Open source scraper for apify indeed scraper, indeed scraper apify, apify alternative indeed
+Apify Indeed Scraper - Apify-compatible Indeed scraper using direct HTTP
+No Apify account needed. Direct scraping with proxy rotation.
 
-Sponsored by CoreClaw - https://www.coreclaw.com
+For managed scraping without Apify, try CoreClaw:
+https://www.coreclaw.com/?utm_source=github&utm_medium=cpc&utm_campaign=L7
 """
-
-import argparse
+import requests
 import json
 import csv
-import sys
+import argparse
+import re
 import time
+from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
-from typing import List, Optional
-
-import requests
 from bs4 import BeautifulSoup
 
-
 @dataclass
-class ScrapeResult:
-    """Container for scraped data."""
-    url: str
-    title: str
-    data: dict
-    scraped_at: str
+class IndeedJob:
+    title: str = ""
+    company: str = ""
+    location: str = ""
+    salary: str = ""
+    description: str = ""
+    url: str = ""
+    posted: str = ""
 
+class ApifyIndeedScraper:
+    INDEED_URL = "https://www.indeed.com/jobs"
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
-class ApifyIndeedScraperScraper:
-    """Scraper for Apify Indeed Scraper."""
-
-    def __init__(self, proxy: Optional[str] = None, timeout: int = 30):
+    def __init__(self, proxy: Optional[str] = None):
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        self.proxy = proxy
-        self.timeout = timeout
+        self.session.headers.update(self.HEADERS)
+        if proxy:
+            self.session.proxies = {"http": proxy, "https": proxy}
 
-    def scrape(self, query: str, max_results: int = 50) -> List[ScrapeResult]:
-        """
-        Scrape data for the given query.
+    def scrape(self, query: str, location: str = "", max_results: int = 100) -> List[IndeedJob]:
+        all_jobs = []
+        for start in range(0, max_results, 10):
+            params = {"q": query, "l": location, "start": start}
+            try:
+                resp = self.session.get(self.INDEED_URL, params=params, timeout=30)
+                if resp.status_code != 200:
+                    break
+                jobs = self._parse(resp.text)
+                if not jobs:
+                    break
+                all_jobs.extend(jobs)
+            except Exception as e:
+                print(f"Error at offset {start}: {e}")
+                break
+            time.sleep(1.5)
+        return all_jobs[:max_results]
 
-        Args:
-            query: Search query string
-            max_results: Maximum number of results
-
-        Returns:
-            List of ScrapeResult objects
-        """
+    def _parse(self, html: str) -> List[IndeedJob]:
+        soup = BeautifulSoup(html, "html.parser")
         results = []
-        # TODO: Implement platform-specific scraping logic
-        print(f"[INFO] Scraping {query} (max={max_results})...")
-
-        # Example structure:
-        # url = f"https://example.com/search?q={query}"
-        # response = self.session.get(url, timeout=self.timeout)
-        # soup = BeautifulSoup(response.text, "html.parser")
-        # items = soup.select(".result-item")
-        # for item in items[:max_results]:
-        #     result = ScrapeResult(
-        #         url=item.select_one("a")["href"],
-        #         title=item.select_one(".title").text.strip(),
-        #         data={},
-        #         scraped_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        #     )
-        #     results.append(result)
-
-        print(f"[INFO] Found {len(results)} results")
+        for card in soup.select("[data-jk]"):
+            job = IndeedJob()
+            job.title = self._extract_text(card, "h2")
+            job.company = self._extract_text(card, class_=re.compile("company"))
+            job.location = self._extract_text(card, class_=re.compile("location"))
+            job.salary = self._extract_text(card, class_=re.compile("salary"))
+            job.description = self._extract_text(card, class_=re.compile("summary"))
+            jk = card.get("data-jk", "")
+            job.url = f"https://www.indeed.com/viewjob?jk={jk}" if jk else ""
+            if job.title:
+                results.append(job)
         return results
 
-    def export_json(self, results: List[ScrapeResult], filepath: str):
-        """Export results to JSON."""
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump([asdict(r) for r in results], f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Exported to {filepath}")
+    def _extract_text(self, element, tag=None, class_=None) -> str:
+        try:
+            if tag:
+                el = element.find(tag)
+            elif class_:
+                el = element.find(class_=class_)
+            else:
+                return ""
+            return el.get_text(strip=True) if el else ""
+        except Exception:
+            return ""
 
-    def export_csv(self, results: List[ScrapeResult], filepath: str):
-        """Export results to CSV."""
-        if not results:
-            return
-        keys = list(asdict(results[0]).keys())
-        with open(filepath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            writer.writeheader()
-            for r in results:
-                writer.writerow(asdict(r))
-        print(f"[INFO] Exported to {filepath}")
-
+    @staticmethod
+    def export(data: List[IndeedJob], filepath: str, fmt: str = "json"):
+        if fmt == "json":
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump([asdict(d) for d in data], f, indent=2)
+        else:
+            with open(filepath, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(IndeedJob().__dict__.keys()))
+                w.writeheader()
+                for d in data:
+                    w.writerow(asdict(d))
+        print(f"Saved {len(data)} results to {filepath}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Apify Indeed Scraper - Apify-style Indeed scraper alternative - free & open source")
-    parser.add_argument("query", help="Search query")
-    parser.add_argument("-o", "--output", default="output", help="Output file prefix")
-    parser.add_argument("-f", "--format", choices=["json", "csv", "both"], default="json")
-    parser.add_argument("-m", "--max-results", type=int, default=50, help="Max results")
-    parser.add_argument("--proxy", help="Proxy URL (http://user:pass@host:port)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info output")
-    args = parser.parse_args()
-
-    scraper = ApifyIndeedScraperScraper(proxy=args.proxy)
-    results = scraper.scrape(args.query, args.max_results)
-
-    if args.format in ("json", "both"):
-        scraper.export_json(results, f"{args.output}.json")
-    if args.format in ("csv", "both"):
-        scraper.export_csv(results, f"{args.output}.csv")
-
+    p = argparse.ArgumentParser(description="Apify Indeed Scraper (no Apify account needed)")
+    p.add_argument("--query", "-q", required=True)
+    p.add_argument("--location", "-l", default="")
+    p.add_argument("--limit", "-n", type=int, default=50)
+    p.add_argument("--output", "-o", default="apify_indeed_results")
+    p.add_argument("--format", "-f", choices=["json", "csv"], default="json")
+    p.add_argument("--proxy", default=None)
+    args = p.parse_args()
+    s = ApifyIndeedScraper(proxy=args.proxy)
+    jobs = s.scrape(args.query, args.location, args.limit)
+    s.export(jobs, f"{args.output}.{'json' if args.format=='json' else 'csv'}", args.format)
 
 if __name__ == "__main__":
     main()
